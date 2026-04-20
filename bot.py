@@ -1,66 +1,57 @@
 import discord
 from discord.ext import commands
-from discord import app_commands
 import asyncio
-import json
 import os
 from datetime import datetime, timedelta
 
 # ========= CONFIGURACIÓN =========
 TOKEN = os.getenv("TOKEN")
 DURACION_SEGUNDOS = 60   # 1 minuto para pruebas
-ARCHIVO_DATOS = "tickets.json"
 # =================================
+
+# {user_id: {"fin": timestamp, "channel_id": int, "message_id": int}}
+tickets_activos = {}
+
+# {user_id: message_id}  — guarda el aviso final para borrarlo al pulsar de nuevo
+avisos_pendientes = {}
 
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 
-# ---------- Persistencia ----------
-def cargar_tickets():
-    if not os.path.exists(ARCHIVO_DATOS):
-        return {}
-    try:
-        with open(ARCHIVO_DATOS, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return {}
-
-def guardar_tickets(data):
-    with open(ARCHIVO_DATOS, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2)
-
-def añadir_ticket(user_id, channel_id, fin_ts):
-    data = cargar_tickets()
-    data[str(user_id)] = {"channel_id": channel_id, "fin": fin_ts}
-    guardar_tickets(data)
-
-def eliminar_ticket(user_id):
-    data = cargar_tickets()
-    data.pop(str(user_id), None)
-    guardar_tickets(data)
-
-
 # ---------- Temporizador ----------
-async def iniciar_temporizador(user_id: int, channel_id: int, segundos_restantes: float):
+async def iniciar_temporizador(user_id: int, channel_id: int, message_id: int, segundos: float):
     try:
-        if segundos_restantes > 0:
-            await asyncio.sleep(segundos_restantes)
+        if segundos > 0:
+            await asyncio.sleep(segundos)
+
+        if user_id not in tickets_activos:
+            return
 
         canal = bot.get_channel(channel_id)
         if canal is None:
             try:
                 canal = await bot.fetch_channel(channel_id)
             except Exception:
-                eliminar_ticket(user_id)
+                tickets_activos.pop(user_id, None)
                 return
 
-        await canal.send(f"<@{user_id}> ya puedes comprar cargadores ✅")
+        # Borrar el mensaje de "Ticket creado"
+        try:
+            msg = await canal.fetch_message(message_id)
+            await msg.delete()
+        except Exception:
+            pass
+
+        # Enviar aviso y guardar su ID
+        aviso = await canal.send(f"<@{user_id}> ya puedes comprar cargadores ✅")
+        avisos_pendientes[user_id] = aviso.id
+
     except Exception as e:
         print(f"Error en temporizador de {user_id}: {e}")
     finally:
-        eliminar_ticket(user_id)  # Al terminar, borra el ticket para que pueda volver a pulsar
+        tickets_activos.pop(user_id, None)
 
 
 # ---------- Botón ----------
@@ -75,32 +66,45 @@ class TicketView(discord.ui.View):
         custom_id="ticket_boton_cargadores",
     )
     async def abrir_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
-        tickets = cargar_tickets()
-        user_id = str(interaction.user.id)
+        user_id = interaction.user.id
 
-        # Si ya tiene un ticket activo, avisa
-        if user_id in tickets:
-            fin_ts = tickets[user_id]["fin"]
+        # Si tiene ticket activo, avisar
+        if user_id in tickets_activos:
+            fin_ts = tickets_activos[user_id]["fin"]
             await interaction.response.send_message(
                 f"⏳ Ya tienes un ticket activo. Termina <t:{int(fin_ts)}:R>.",
                 ephemeral=True,
             )
             return
 
+        # Borrar el aviso anterior si existe
+        if user_id in avisos_pendientes:
+            try:
+                canal = interaction.channel
+                msg_aviso = await canal.fetch_message(avisos_pendientes[user_id])
+                await msg_aviso.delete()
+            except Exception:
+                pass
+            avisos_pendientes.pop(user_id, None)
+
         # Crear nuevo ticket
         fin_dt = datetime.utcnow() + timedelta(seconds=DURACION_SEGUNDOS)
         fin_ts = fin_dt.timestamp()
 
-        añadir_ticket(interaction.user.id, interaction.channel.id, fin_ts)
-
         await interaction.response.send_message(
             f"🎫 Ticket creado para {interaction.user.mention}.\n"
             f"Te avisaré aquí <t:{int(fin_ts)}:R> (el <t:{int(fin_ts)}:F>).",
-            ephemeral=False,
         )
+        msg = await interaction.original_response()
+
+        tickets_activos[user_id] = {
+            "fin": fin_ts,
+            "channel_id": interaction.channel.id,
+            "message_id": msg.id,
+        }
 
         bot.loop.create_task(
-            iniciar_temporizador(interaction.user.id, interaction.channel.id, DURACION_SEGUNDOS)
+            iniciar_temporizador(user_id, interaction.channel.id, msg.id, DURACION_SEGUNDOS)
         )
 
 
@@ -121,22 +125,11 @@ def hacer_embed():
 @bot.event
 async def on_ready():
     bot.add_view(TicketView())
-
-    data = cargar_tickets()
-    ahora = datetime.utcnow().timestamp()
-    for user_id, info in list(data.items()):
-        restante = info["fin"] - ahora
-        if restante <= 0:
-            bot.loop.create_task(iniciar_temporizador(int(user_id), info["channel_id"], 0))
-        else:
-            bot.loop.create_task(iniciar_temporizador(int(user_id), info["channel_id"], restante))
-
     try:
         synced = await bot.tree.sync()
         print(f"Slash commands sincronizados: {len(synced)}")
     except Exception as e:
         print(f"Error sincronizando: {e}")
-
     print(f"Bot conectado como {bot.user}")
 
 
@@ -145,6 +138,18 @@ async def on_ready():
 @commands.has_permissions(manage_guild=True)
 async def cargador(ctx):
     await ctx.send(embed=hacer_embed(), view=TicketView())
+
+
+# ---------- !reset ----------
+@bot.command(name="reset")
+async def reset(ctx):
+    user_id = ctx.author.id
+    if user_id in tickets_activos:
+        tickets_activos.pop(user_id)
+        avisos_pendientes.pop(user_id, None)
+        await ctx.send("✅ Ticket reseteado.", delete_after=5)
+    else:
+        await ctx.send("No tienes ningún ticket activo.", delete_after=5)
 
 
 bot.run(TOKEN)
