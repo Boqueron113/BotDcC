@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 
 # ========= CONFIGURACIÓN =========
 TOKEN = os.getenv("TOKEN")
-DURACION_SEGUNDOS = 60   # 1 minuto para pruebas
+DURACION_SEGUNDOS = 3 * 24 * 60 * 60   # 1 minuto para pruebas
 # =================================
 
 # {user_id: {"fin": fin_ts, "channel_id": int, "confirm_msg_id": int}}
