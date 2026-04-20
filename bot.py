@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 
 # ========= CONFIGURACIÓN =========
 import os
-TOKEN = os.getenv("EeAoLkMu3de7DrFrdnauSsrFDDJmLYqT")
+TOKEN = os.getenv("TOKEN")
 DURACION_SEGUNDOS = 60   # 3 días. Para pruebas puedes poner 60 (1 minuto)
 ARCHIVO_DATOS = "tickets.json"         # Para que los timers sobrevivan reinicios
 # =================================
