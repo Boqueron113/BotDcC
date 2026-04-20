@@ -7,10 +7,9 @@ import os
 from datetime import datetime, timedelta
 
 # ========= CONFIGURACIÓN =========
-import os
 TOKEN = os.getenv("TOKEN")
-DURACION_SEGUNDOS = 60   # 3 días. Para pruebas puedes poner 60 (1 minuto)
-ARCHIVO_DATOS = "tickets.json"         # Para que los timers sobrevivan reinicios
+DURACION_SEGUNDOS = 60   # 1 minuto para pruebas
+ARCHIVO_DATOS = "tickets.json"
 # =================================
 
 intents = discord.Intents.default()
@@ -48,7 +47,6 @@ def eliminar_ticket(user_id):
 
 # ---------- Lógica del temporizador ----------
 async def iniciar_temporizador(user_id: int, channel_id: int, segundos_restantes: float):
-    """Espera el tiempo indicado y luego avisa al usuario en el canal."""
     try:
         if segundos_restantes > 0:
             await asyncio.sleep(segundos_restantes)
@@ -71,7 +69,7 @@ async def iniciar_temporizador(user_id: int, channel_id: int, segundos_restantes
 # ---------- Vista con el botón (persistente) ----------
 class TicketView(discord.ui.View):
     def __init__(self):
-        super().__init__(timeout=None)  # Persistente tras reinicios
+        super().__init__(timeout=None)
 
     @discord.ui.button(
         label="Abrir ticket",
@@ -83,7 +81,6 @@ class TicketView(discord.ui.View):
         tickets = cargar_tickets()
         user_id = str(interaction.user.id)
 
-        # Evitar dobles clics del mismo usuario
         if user_id in tickets:
             fin = datetime.fromtimestamp(tickets[user_id]["fin"])
             await interaction.response.send_message(
@@ -111,9 +108,8 @@ class TicketView(discord.ui.View):
 # ---------- Eventos ----------
 @bot.event
 async def on_ready():
-    bot.add_view(TicketView())  # Registra la vista persistente
+    bot.add_view(TicketView())
 
-    # Reanudar timers que estaban en marcha antes de reiniciar el bot
     data = cargar_tickets()
     ahora = datetime.utcnow().timestamp()
     for user_id, info in list(data.items()):
@@ -132,10 +128,10 @@ async def on_ready():
     print(f"Bot conectado como {bot.user}")
 
 
-# ---------- Comando para publicar el panel con el botón ----------
+# ---------- Comando slash /panel ----------
 @bot.tree.command(name="panel", description="Publica el panel con el botón de ticket")
 @app_commands.default_permissions(manage_guild=True)
-async def panel(interaction: discord.Interaction):
+async def panel_slash(interaction: discord.Interaction):
     embed = discord.Embed(
         title="🎫 Sistema de tickets — Cargadores",
         description=(
@@ -147,6 +143,22 @@ async def panel(interaction: discord.Interaction):
     )
     await interaction.channel.send(embed=embed, view=TicketView())
     await interaction.response.send_message("Panel publicado ✅", ephemeral=True)
+
+
+# ---------- Comando de texto !panel ----------
+@bot.command(name="panel")
+@commands.has_permissions(manage_guild=True)
+async def panel_prefix(ctx):
+    embed = discord.Embed(
+        title="🎫 Sistema de tickets — Cargadores",
+        description=(
+            "Pulsa el botón para abrir tu ticket.\n"
+            "Se iniciará un contador de **3 días** y te avisaré aquí "
+            "cuando ya puedas comprar cargadores."
+        ),
+        color=discord.Color.blurple(),
+    )
+    await ctx.send(embed=embed, view=TicketView())
 
 
 bot.run(TOKEN)
