@@ -27,17 +27,14 @@ def cargar_tickets():
     except Exception:
         return {}
 
-
 def guardar_tickets(data):
     with open(ARCHIVO_DATOS, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
-
 
 def añadir_ticket(user_id, channel_id, fin_ts):
     data = cargar_tickets()
     data[str(user_id)] = {"channel_id": channel_id, "fin": fin_ts}
     guardar_tickets(data)
-
 
 def eliminar_ticket(user_id):
     data = cargar_tickets()
@@ -45,7 +42,7 @@ def eliminar_ticket(user_id):
     guardar_tickets(data)
 
 
-# ---------- Lógica del temporizador ----------
+# ---------- Temporizador ----------
 async def iniciar_temporizador(user_id: int, channel_id: int, segundos_restantes: float):
     try:
         if segundos_restantes > 0:
@@ -63,10 +60,10 @@ async def iniciar_temporizador(user_id: int, channel_id: int, segundos_restantes
     except Exception as e:
         print(f"Error en temporizador de {user_id}: {e}")
     finally:
-        eliminar_ticket(user_id)
+        eliminar_ticket(user_id)  # Al terminar, borra el ticket para que pueda volver a pulsar
 
 
-# ---------- Vista con el botón (persistente) ----------
+# ---------- Botón ----------
 class TicketView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
@@ -81,14 +78,16 @@ class TicketView(discord.ui.View):
         tickets = cargar_tickets()
         user_id = str(interaction.user.id)
 
+        # Si ya tiene un ticket activo, avisa
         if user_id in tickets:
-            fin = datetime.fromtimestamp(tickets[user_id]["fin"])
+            fin_ts = tickets[user_id]["fin"]
             await interaction.response.send_message(
-                f"⏳ Ya tienes un ticket activo. Termina <t:{int(fin.timestamp())}:R>.",
+                f"⏳ Ya tienes un ticket activo. Termina <t:{int(fin_ts)}:R>.",
                 ephemeral=True,
             )
             return
 
+        # Crear nuevo ticket
         fin_dt = datetime.utcnow() + timedelta(seconds=DURACION_SEGUNDOS)
         fin_ts = fin_dt.timestamp()
 
@@ -105,7 +104,20 @@ class TicketView(discord.ui.View):
         )
 
 
-# ---------- Eventos ----------
+# ---------- Embed ----------
+def hacer_embed():
+    return discord.Embed(
+        title="🎫 Sistema de tickets — Cargadores",
+        description=(
+            "Pulsa el botón para abrir tu ticket.\n"
+            "Se iniciará un contador y te avisaré aquí "
+            "cuando ya puedas comprar cargadores."
+        ),
+        color=discord.Color.blurple(),
+    )
+
+
+# ---------- On ready ----------
 @bot.event
 async def on_ready():
     bot.add_view(TicketView())
@@ -128,37 +140,11 @@ async def on_ready():
     print(f"Bot conectado como {bot.user}")
 
 
-# ---------- Comando slash /panel ----------
-@bot.tree.command(name="panel", description="Publica el panel con el botón de ticket")
-@app_commands.default_permissions(manage_guild=True)
-async def panel_slash(interaction: discord.Interaction):
-    embed = discord.Embed(
-        title="🎫 Sistema de tickets — Cargadores",
-        description=(
-            "Pulsa el botón para abrir tu ticket.\n"
-            "Se iniciará un contador de **3 días** y te avisaré aquí "
-            "cuando ya puedas comprar cargadores."
-        ),
-        color=discord.Color.blurple(),
-    )
-    await interaction.channel.send(embed=embed, view=TicketView())
-    await interaction.response.send_message("Panel publicado ✅", ephemeral=True)
-
-
-# ---------- Comando de texto !panel ----------
-@bot.command(name="panel")
+# ---------- !cargador ----------
+@bot.command(name="cargador")
 @commands.has_permissions(manage_guild=True)
-async def panel_prefix(ctx):
-    embed = discord.Embed(
-        title="🎫 Sistema de tickets — Cargadores",
-        description=(
-            "Pulsa el botón para abrir tu ticket.\n"
-            "Se iniciará un contador de **3 días** y te avisaré aquí "
-            "cuando ya puedas comprar cargadores."
-        ),
-        color=discord.Color.blurple(),
-    )
-    await ctx.send(embed=embed, view=TicketView())
+async def cargador(ctx):
+    await ctx.send(embed=hacer_embed(), view=TicketView())
 
 
 bot.run(TOKEN)
