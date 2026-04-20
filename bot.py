@@ -7,7 +7,8 @@ import os
 from datetime import datetime, timedelta
 
 # ========= CONFIGURACIÓN =========
-TOKEN = "PON_AQUI_TU_TOKEN"   # Token del bot (https://discord.com/developers/applications)
+import os
+TOKEN = os.getenv("EeAoLkMu3de7DrFrdnauSsrFDDJmLYqT")
 DURACION_SEGUNDOS = 3 * 24 * 60 * 60   # 3 días. Para pruebas puedes poner 60 (1 minuto)
 ARCHIVO_DATOS = "tickets.json"         # Para que los timers sobrevivan reinicios
 # =================================
