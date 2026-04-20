@@ -9,10 +9,10 @@ TOKEN = os.getenv("TOKEN")
 DURACION_SEGUNDOS = 60   # 1 minuto para pruebas
 # =================================
 
-# {user_id: {"fin": timestamp, "channel_id": int, "message_id": int}}
+# {user_id: {"fin": fin_ts, "channel_id": int, "confirm_msg_id": int}}
 tickets_activos = {}
 
-# {user_id: message_id}  — guarda el aviso final para borrarlo al pulsar de nuevo
+# {user_id: message_id} — ID del aviso final para borrarlo al pulsar el botón
 avisos_pendientes = {}
 
 intents = discord.Intents.default()
@@ -20,8 +20,68 @@ intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 
+# ---------- Vista del aviso final (con botón para nuevo ticket) ----------
+class AvisoView(discord.ui.View):
+    def __init__(self, user_id: int):
+        super().__init__(timeout=None)
+        self.user_id = user_id
+
+    @discord.ui.button(
+        label="Abrir nuevo ticket",
+        style=discord.ButtonStyle.success,
+        emoji="🎫",
+        custom_id="ticket_boton_nuevo",
+    )
+    async def nuevo_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
+        user_id = interaction.user.id
+
+        # Solo el usuario al que va el aviso puede pulsarlo
+        if user_id != self.user_id:
+            await interaction.response.send_message(
+                "❌ Este botón no es para ti.",
+                ephemeral=True,
+            )
+            return
+
+        # Si ya tiene ticket activo
+        if user_id in tickets_activos:
+            fin_ts = tickets_activos[user_id]["fin"]
+            await interaction.response.send_message(
+                f"⏳ Ya tienes un ticket activo. Termina <t:{int(fin_ts)}:R>.",
+                ephemeral=True,
+            )
+            return
+
+        # Borrar el aviso
+        try:
+            await interaction.message.delete()
+        except Exception:
+            pass
+        avisos_pendientes.pop(user_id, None)
+
+        # Crear nuevo ticket
+        fin_dt = datetime.utcnow() + timedelta(seconds=DURACION_SEGUNDOS)
+        fin_ts = fin_dt.timestamp()
+
+        await interaction.response.send_message(
+            f"🎫 Ticket creado para {interaction.user.mention}.\n"
+            f"Te avisaré aquí <t:{int(fin_ts)}:R> (el <t:{int(fin_ts)}:F>).",
+        )
+        msg = await interaction.original_response()
+
+        tickets_activos[user_id] = {
+            "fin": fin_ts,
+            "channel_id": interaction.channel.id,
+            "confirm_msg_id": msg.id,
+        }
+
+        bot.loop.create_task(
+            iniciar_temporizador(user_id, interaction.channel.id, msg.id, DURACION_SEGUNDOS)
+        )
+
+
 # ---------- Temporizador ----------
-async def iniciar_temporizador(user_id: int, channel_id: int, message_id: int, segundos: float):
+async def iniciar_temporizador(user_id: int, channel_id: int, confirm_msg_id: int, segundos: float):
     try:
         if segundos > 0:
             await asyncio.sleep(segundos)
@@ -37,15 +97,18 @@ async def iniciar_temporizador(user_id: int, channel_id: int, message_id: int, s
                 tickets_activos.pop(user_id, None)
                 return
 
-        # Borrar el mensaje de "Ticket creado"
+        # Borrar mensaje de confirmación "Ticket creado para..."
         try:
-            msg = await canal.fetch_message(message_id)
-            await msg.delete()
+            confirm_msg = await canal.fetch_message(confirm_msg_id)
+            await confirm_msg.delete()
         except Exception:
             pass
 
-        # Enviar aviso y guardar su ID
-        aviso = await canal.send(f"<@{user_id}> ya puedes comprar cargadores ✅")
+        # Enviar aviso con botón para nuevo ticket
+        aviso = await canal.send(
+            f"<@{user_id}> ya puedes comprar cargadores ✅",
+            view=AvisoView(user_id)
+        )
         avisos_pendientes[user_id] = aviso.id
 
     except Exception as e:
@@ -54,7 +117,7 @@ async def iniciar_temporizador(user_id: int, channel_id: int, message_id: int, s
         tickets_activos.pop(user_id, None)
 
 
-# ---------- Botón ----------
+# ---------- Vista del panel principal ----------
 class TicketView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
@@ -68,7 +131,6 @@ class TicketView(discord.ui.View):
     async def abrir_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
         user_id = interaction.user.id
 
-        # Si tiene ticket activo, avisar
         if user_id in tickets_activos:
             fin_ts = tickets_activos[user_id]["fin"]
             await interaction.response.send_message(
@@ -77,17 +139,15 @@ class TicketView(discord.ui.View):
             )
             return
 
-        # Borrar el aviso anterior si existe
+        # Borrar aviso pendiente si existe
         if user_id in avisos_pendientes:
             try:
-                canal = interaction.channel
-                msg_aviso = await canal.fetch_message(avisos_pendientes[user_id])
+                msg_aviso = await interaction.channel.fetch_message(avisos_pendientes[user_id])
                 await msg_aviso.delete()
             except Exception:
                 pass
             avisos_pendientes.pop(user_id, None)
 
-        # Crear nuevo ticket
         fin_dt = datetime.utcnow() + timedelta(seconds=DURACION_SEGUNDOS)
         fin_ts = fin_dt.timestamp()
 
@@ -100,7 +160,7 @@ class TicketView(discord.ui.View):
         tickets_activos[user_id] = {
             "fin": fin_ts,
             "channel_id": interaction.channel.id,
-            "message_id": msg.id,
+            "confirm_msg_id": msg.id,
         }
 
         bot.loop.create_task(
