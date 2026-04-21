@@ -6,115 +6,136 @@ from datetime import datetime, timedelta
 
 # ========= CONFIGURACIÓN =========
 TOKEN = os.getenv("TOKEN")
-DURACION_SEGUNDOS = 3 * 24 * 60 * 60   # 1 minuto para pruebas
+DURACION_SEGUNDOS = 60           # 1 minuto para pruebas (cambia a 3 * 24 * 60 * 60 para 3 días)
+CATEGORIA_NOMBRE = "Tickets"     # Nombre de la categoría donde se crearán los canales
 # =================================
 
-# {user_id: {"fin": fin_ts, "channel_id": int, "confirm_msg_id": int}}
+# {user_id: {"channel_id": int, "task": asyncio.Task}}
 tickets_activos = {}
-
-# {user_id: message_id} — ID del aviso final para borrarlo al pulsar el botón
-avisos_pendientes = {}
 
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 
-# ---------- Vista del aviso final (con botón para nuevo ticket) ----------
-class AvisoView(discord.ui.View):
+# ---------- Buscar o crear categoría ----------
+async def obtener_categoria(guild: discord.Guild) -> discord.CategoryChannel:
+    categoria = discord.utils.get(guild.categories, name=CATEGORIA_NOMBRE)
+    if categoria is None:
+        categoria = await guild.create_category(CATEGORIA_NOMBRE)
+    return categoria
+
+
+# ---------- Vista dentro del canal privado (activo) ----------
+class TicketActivoView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(
+        label="Eliminar canal",
+        style=discord.ButtonStyle.danger,
+        emoji="🗑️",
+        custom_id="ticket_eliminar",
+    )
+    async def eliminar(self, interaction: discord.Interaction, button: discord.ui.Button):
+        user_id = interaction.user.id
+        if user_id in tickets_activos:
+            task = tickets_activos[user_id].get("task")
+            if task:
+                task.cancel()
+            tickets_activos.pop(user_id, None)
+        await interaction.response.send_message("Eliminando canal...", ephemeral=True)
+        await asyncio.sleep(2)
+        await interaction.channel.delete()
+
+
+# ---------- Vista del aviso final (reiniciar o eliminar) ----------
+class AvisoFinalView(discord.ui.View):
     def __init__(self, user_id: int):
         super().__init__(timeout=None)
         self.user_id = user_id
 
     @discord.ui.button(
-        label="Abrir nuevo ticket",
-        style=discord.ButtonStyle.success,
-        emoji="🎫",
-        custom_id="ticket_boton_nuevo",
+        label="Reiniciar contador",
+        style=discord.ButtonStyle.primary,
+        emoji="🔄",
+        custom_id="ticket_reiniciar",
     )
-    async def nuevo_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def reiniciar(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("❌ Este botón no es para ti.", ephemeral=True)
+            return
+
         user_id = interaction.user.id
-
-        # Solo el usuario al que va el aviso puede pulsarlo
-        if user_id != self.user_id:
-            await interaction.response.send_message(
-                "❌ Este botón no es para ti.",
-                ephemeral=True,
-            )
-            return
-
-        # Si ya tiene ticket activo
-        if user_id in tickets_activos:
-            fin_ts = tickets_activos[user_id]["fin"]
-            await interaction.response.send_message(
-                f"⏳ Ya tienes un ticket activo. Termina <t:{int(fin_ts)}:R>.",
-                ephemeral=True,
-            )
-            return
-
-        # Borrar el aviso
-        try:
-            await interaction.message.delete()
-        except Exception:
-            pass
-        avisos_pendientes.pop(user_id, None)
-
-        # Crear nuevo ticket
         fin_dt = datetime.utcnow() + timedelta(seconds=DURACION_SEGUNDOS)
         fin_ts = fin_dt.timestamp()
 
-        await interaction.response.send_message(
-            f"🎫 Ticket creado para {interaction.user.mention}.\n"
-            f"Te avisaré aquí <t:{int(fin_ts)}:R> (el <t:{int(fin_ts)}:F>).",
-        )
-        msg = await interaction.original_response()
+        # Cancelar tarea anterior si existe
+        if user_id in tickets_activos:
+            task = tickets_activos[user_id].get("task")
+            if task:
+                task.cancel()
 
         tickets_activos[user_id] = {
-            "fin": fin_ts,
             "channel_id": interaction.channel.id,
-            "confirm_msg_id": msg.id,
+            "task": None,
         }
 
-        bot.loop.create_task(
-            iniciar_temporizador(user_id, interaction.channel.id, msg.id, DURACION_SEGUNDOS)
+        await interaction.response.edit_message(
+            content=f"🔄 Contador reiniciado. Te avisaré <t:{int(fin_ts)}:R>.",
+            view=TicketActivoView()
         )
 
+        task = bot.loop.create_task(
+            temporizador_canal(user_id, interaction.channel.id, fin_ts, DURACION_SEGUNDOS)
+        )
+        tickets_activos[user_id]["task"] = task
 
-# ---------- Temporizador ----------
-async def iniciar_temporizador(user_id: int, channel_id: int, confirm_msg_id: int, segundos: float):
+    @discord.ui.button(
+        label="Eliminar canal",
+        style=discord.ButtonStyle.danger,
+        emoji="🗑️",
+        custom_id="ticket_eliminar_final",
+    )
+    async def eliminar(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("❌ Este botón no es para ti.", ephemeral=True)
+            return
+
+        user_id = interaction.user.id
+        if user_id in tickets_activos:
+            task = tickets_activos[user_id].get("task")
+            if task:
+                task.cancel()
+            tickets_activos.pop(user_id, None)
+
+        await interaction.response.send_message("Eliminando canal...", ephemeral=True)
+        await asyncio.sleep(2)
+        await interaction.channel.delete()
+
+
+# ---------- Temporizador dentro del canal ----------
+async def temporizador_canal(user_id: int, channel_id: int, fin_ts: float, segundos: float):
     try:
-        if segundos > 0:
-            await asyncio.sleep(segundos)
+        await asyncio.sleep(segundos)
 
         if user_id not in tickets_activos:
             return
 
         canal = bot.get_channel(channel_id)
         if canal is None:
-            try:
-                canal = await bot.fetch_channel(channel_id)
-            except Exception:
-                tickets_activos.pop(user_id, None)
-                return
+            tickets_activos.pop(user_id, None)
+            return
 
-        # Borrar mensaje de confirmación "Ticket creado para..."
-        try:
-            confirm_msg = await canal.fetch_message(confirm_msg_id)
-            await confirm_msg.delete()
-        except Exception:
-            pass
-
-        # Enviar aviso con botón para nuevo ticket
-        aviso = await canal.send(
-            f"<@{user_id}> ya puedes comprar cargadores ✅",
-            view=AvisoView(user_id)
+        await canal.send(
+            f"<@{user_id}> ✅ ya puedes comprar cargadores!\n¿Qué quieres hacer?",
+            view=AvisoFinalView(user_id)
         )
-        avisos_pendientes[user_id] = aviso.id
 
+    except asyncio.CancelledError:
+        pass
     except Exception as e:
         print(f"Error en temporizador de {user_id}: {e}")
-    finally:
-        tickets_activos.pop(user_id, None)
 
 
 # ---------- Vista del panel principal ----------
@@ -130,42 +151,54 @@ class TicketView(discord.ui.View):
     )
     async def abrir_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
         user_id = interaction.user.id
+        guild = interaction.guild
 
+        # Si ya tiene canal activo
         if user_id in tickets_activos:
-            fin_ts = tickets_activos[user_id]["fin"]
-            await interaction.response.send_message(
-                f"⏳ Ya tienes un ticket activo. Termina <t:{int(fin_ts)}:R>.",
-                ephemeral=True,
-            )
-            return
+            channel_id = tickets_activos[user_id]["channel_id"]
+            canal = bot.get_channel(channel_id)
+            if canal:
+                await interaction.response.send_message(
+                    f"⏳ Ya tienes un ticket activo: {canal.mention}",
+                    ephemeral=True,
+                )
+                return
+            else:
+                tickets_activos.pop(user_id)
 
-        # Borrar aviso pendiente si existe
-        if user_id in avisos_pendientes:
-            try:
-                msg_aviso = await interaction.channel.fetch_message(avisos_pendientes[user_id])
-                await msg_aviso.delete()
-            except Exception:
-                pass
-            avisos_pendientes.pop(user_id, None)
+        await interaction.response.defer(ephemeral=True)
+
+        # Crear canal privado
+        categoria = await obtener_categoria(guild)
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(view_channel=False),
+            interaction.user: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True),
+            guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True, manage_channels=True),
+        }
+
+        nombre_canal = f"cargadores-{interaction.user.name}".lower().replace(" ", "-")[:32]
+        canal = await categoria.create_text_channel(nombre_canal, overwrites=overwrites)
 
         fin_dt = datetime.utcnow() + timedelta(seconds=DURACION_SEGUNDOS)
         fin_ts = fin_dt.timestamp()
 
-        await interaction.response.send_message(
-            f"🎫 Ticket creado para {interaction.user.mention}.\n"
-            f"Te avisaré aquí <t:{int(fin_ts)}:R> (el <t:{int(fin_ts)}:F>).",
-        )
-        msg = await interaction.original_response()
-
         tickets_activos[user_id] = {
-            "fin": fin_ts,
-            "channel_id": interaction.channel.id,
-            "confirm_msg_id": msg.id,
+            "channel_id": canal.id,
+            "task": None,
         }
 
-        bot.loop.create_task(
-            iniciar_temporizador(user_id, interaction.channel.id, msg.id, DURACION_SEGUNDOS)
+        await canal.send(
+            f"👋 Hola {interaction.user.mention}!\n"
+            f"Tu ticket ha sido creado. Te avisaré aquí <t:{int(fin_ts)}:R> (el <t:{int(fin_ts)}:F>) cuando puedas comprar cargadores.",
+            view=TicketActivoView()
         )
+
+        task = bot.loop.create_task(
+            temporizador_canal(user_id, canal.id, fin_ts, DURACION_SEGUNDOS)
+        )
+        tickets_activos[user_id]["task"] = task
+
+        await interaction.followup.send(f"✅ Canal creado: {canal.mention}", ephemeral=True)
 
 
 # ---------- Embed ----------
@@ -174,8 +207,8 @@ def hacer_embed():
         title="🎫 Sistema de tickets — Cargadores",
         description=(
             "Pulsa el botón para abrir tu ticket.\n"
-            "Se iniciará un contador y te avisaré aquí "
-            "cuando ya puedas comprar cargadores."
+            "Se creará un canal privado con tu contador.\n"
+            "Cuando puedas comprar cargadores te avisaremos ahí."
         ),
         color=discord.Color.blurple(),
     )
@@ -185,6 +218,7 @@ def hacer_embed():
 @bot.event
 async def on_ready():
     bot.add_view(TicketView())
+    bot.add_view(TicketActivoView())
     try:
         synced = await bot.tree.sync()
         print(f"Slash commands sincronizados: {len(synced)}")
@@ -198,18 +232,6 @@ async def on_ready():
 @commands.has_permissions(manage_guild=True)
 async def cargador(ctx):
     await ctx.send(embed=hacer_embed(), view=TicketView())
-
-
-# ---------- !reset ----------
-@bot.command(name="reset")
-async def reset(ctx):
-    user_id = ctx.author.id
-    if user_id in tickets_activos:
-        tickets_activos.pop(user_id)
-        avisos_pendientes.pop(user_id, None)
-        await ctx.send("✅ Ticket reseteado.", delete_after=5)
-    else:
-        await ctx.send("No tienes ningún ticket activo.", delete_after=5)
 
 
 bot.run(TOKEN)
